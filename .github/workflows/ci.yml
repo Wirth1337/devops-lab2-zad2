@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [3.10, 3.11]
+    env:
+      BUILD_NAME: app-${{ matrix.python-version }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ matrix.python-version }}-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ matrix.python-version }}-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run tests
+        run: |
+          python -m pip install pytest
+          pytest -q
+        
+
+      - name: Build artifact (zip source)
+        run: |
+          mkdir -p build
+          zip -r build/${{ env.BUILD_NAME }}.zip src || true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUILD_NAME }}
+          path: build/${{ env.BUILD_NAME }}.zip
+
+      
+      - name: Notify webhook on failure
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          echo "Notifying webhook about failure..."
+          payload=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg workflow "${{ github.workflow }}" \
+            --arg status "FAILED" \
+            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{content: ("Workflow: "+$workflow+" - Status: "+$status+" - Repo: "+$repo+" - Details: "+$run_url)}')
+  
+          if command -v jq >/dev/null 2>&1; then
+            curl -s -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" || true
+          else
+            curl -s -H "Content-Type: application/json" -d "{\"content\":\"Workflow: ${{ github.workflow }} - Status: FAILED - Repo: ${{ github.repository }} - Details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" "$WEBHOOK_URL" || true
+          fi
